@@ -19,6 +19,37 @@ jobs:
       run:
         working-directory: services/ingestion-service
 
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: prpilot
+          POSTGRES_PASSWORD: prpilot_dev
+          POSTGRES_DB: prpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      kafka:
+        image: confluentinc/cp-kafka:7.7.0
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          CLUSTER_ID: prpilot-kafka-cluster
+        ports:
+          - 9092:9092
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,10 +66,16 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=prpilot_dev psql -h localhost -U prpilot -d prpilot -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
       - name: Build and run tests
         run: ./gradlew build
         env:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          POSTGRES_HOST: localhost
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
 
       - name: Upload test report
         if: always()
