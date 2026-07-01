@@ -1,0 +1,69 @@
+name: review-service CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/review-service/**'
+      - '.github/workflows/review-service-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/review-service/**'
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/review-service
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: prpilot
+          POSTGRES_PASSWORD: prpilot_dev
+          POSTGRES_DB: prpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=prpilot_dev psql -h localhost -U prpilot -d prpilot -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Build and run tests
+        run: ./gradlew build
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-service-test-report
+          path: services/review-service/build/reports/tests/test/
+          retention-days: 14
