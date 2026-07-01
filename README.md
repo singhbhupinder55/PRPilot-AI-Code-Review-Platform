@@ -13,15 +13,15 @@ back to the PR — built as a Kafka-backed microservices system.
 
 | Service | Status |
 |---|---|
-| `webhook-service` | ✅ Built — receives GitHub PR webhooks, verifies HMAC-SHA256 signatures, publishes events to Kafka |
-| `ingestion-service` | ✅ Built — consumes PR events, clones repos, chunks source code, generates embeddings, persists to Postgres + pgvector |
-| `review-service` | ✅ Built — RAG retrieval + Claude-powered PR review, persisted with status tracking |
-| `notification-service` | ⏳ Planned — posts review comments back to GitHub PR |
+| `webhook-service` | ✅ Built & tested — receives GitHub PR webhooks, HMAC-SHA256 verified, publishes to Kafka |
+| `ingestion-service` | ✅ Built & tested — clones repos, chunks code, generates embeddings, persists to pgvector |
+| `review-service` | ✅ Built & tested — RAG retrieval + Claude-powered review, persisted with status tracking |
+| `notification-service` | ⏳ In progress — posts review comments back to GitHub PR |
 | `api-gateway` | ⏳ Planned |
 | `frontend` | ⏳ Planned — React dashboard |
 
-**Core AI pipeline is fully working end-to-end**, verified against a real GitHub
-repo: webhook triggers ingestion, real embeddings generated via Voyage AI, pgvector
+**Core AI pipeline fully working end-to-end**, verified against a real GitHub
+repo: webhook triggers ingestion (real embeddings via Voyage AI), pgvector
 similarity search retrieves relevant code context, Claude generates a structured
 8,000+ character code review stored in Postgres.
 
@@ -45,8 +45,8 @@ webhook-service ──► Kafka (pr.events) ──► ingestion-service
                                             │
                                     reviews table (Postgres)
                                             │
-                                    notification-service ──► GitHub PR comment
-                                         (planned)
+                                  notification-service ──► GitHub PR comment
+                                       (in progress)
 ```
 
 ## Tech stack
@@ -54,10 +54,11 @@ webhook-service ──► Kafka (pr.events) ──► ingestion-service
 - **Backend:** Java 21, Spring Boot 3.5
 - **Messaging:** Apache Kafka
 - **Data:** PostgreSQL + pgvector (HNSW index, cosine similarity), Redis
-- **Schema migrations:** Flyway (coordinated across services, versioned globally)
-- **Repo cloning:** JGit (pure-Java Git client, shallow clones)
+- **Schema migrations:** Flyway (versioned globally across services)
+- **Repo cloning:** JGit (pure-Java, shallow clones)
 - **Embeddings:** Voyage AI (`voyage-code-2`, 1536-dim, code-specialized)
-- **AI review:** Claude API — `claude-haiku-4-5` (model cascading planned)
+- **AI review:** Claude API (`claude-haiku-4-5`, model cascading planned)
+- **Testing:** JUnit 5, Testcontainers, Mockito, Awaitility
 - **Frontend (planned):** React, TypeScript
 - **Infra:** Docker Compose (local), GitHub Actions (CI)
 
@@ -76,7 +77,7 @@ Start infrastructure:
 docker compose up -d
 ```
 
-Run services (each in its own terminal):
+Run services (each in its own terminal, always `source ~/.zshrc` first):
 
 ```bash
 cd services/webhook-service && ./gradlew bootRun    # :8081
@@ -89,11 +90,11 @@ cd services/review-service && ./gradlew bootRun     # :8083
 Entry point for GitHub PR events.
 
 - Validates incoming webhooks via HMAC-SHA256 signature verification
-  (constant-time comparison, prevents forged requests and timing attacks)
-- Publishes validated events to Kafka topic `pr.events`, keyed by repo
-  for per-repository ordering guarantees
-- Idempotent Kafka producer (`acks=all`, `enable.idempotence=true`)
-- 9 tests: unit tests on HMAC verification + Testcontainers integration tests
+  (constant-time comparison prevents timing attacks)
+- Publishes to Kafka topic `pr.events`, keyed by repo for ordering guarantees
+- Idempotent producer (`acks=all`, `enable.idempotence=true`)
+- **9 tests:** HMAC unit tests (6 attack scenarios) + Testcontainers
+  integration tests (full HTTP-to-Kafka pipeline)
 
 ```bash
 cd services/webhook-service
@@ -105,17 +106,17 @@ cd services/webhook-service
 
 Kafka consumer that turns a PR event into searchable, embedded code context.
 
-- Consumes `pr.events` via `@KafkaListener` with `ErrorHandlingDeserializer`
-  (prevents infinite retry loop on malformed messages)
-- Shallow-clones repos with JGit (depth=1), filters to source files only
-- Chunks source files into 60-line segments (line-based baseline strategy)
-- Persists chunks to Postgres via Spring Data JPA, schema via Flyway
-  (`ddl-auto: validate` — no auto-DDL in any environment)
+- Consumes `pr.events` with `ErrorHandlingDeserializer` (prevents infinite
+  retry loop on malformed messages — a real production failure mode)
+- Shallow-clones repos with JGit (depth=1), filters source files only
+- Chunks source files into 60-line segments (line-based baseline strategy;
+  AST-aware chunking is a planned v2 improvement)
+- Persists chunks via Spring Data JPA + Flyway (`ddl-auto: validate`)
 - Generates 1536-dim embeddings via Voyage AI `voyage-code-2` in batches,
   with exponential backoff retry on rate limits
-- Stores vectors in pgvector with HNSW index for approximate nearest-neighbor search
-- 11 tests: smoke test + 10 CodeChunker unit tests covering boundaries,
-  filtering, error isolation
+- Stores vectors in pgvector with HNSW index for sub-linear similarity search
+- **11 tests:** smoke test + CodeChunker unit tests covering boundary math,
+  extension/directory filtering, unreadable file isolation
 
 ```bash
 cd services/ingestion-service
@@ -127,20 +128,22 @@ cd services/ingestion-service
 
 RAG-powered AI code reviewer using Claude.
 
-- Consumes `pr.events` from Kafka (separate consumer group from ingestion)
-- Embeds PR metadata as a **query** vector via Voyage AI (`input_type: query`
-  vs `document` — improves retrieval relevance)
-- Runs pgvector cosine similarity search to retrieve top-8 most relevant
-  code chunks from the codebase
+- Separate Kafka consumer group from ingestion — both services process
+  every PR event independently
+- Embeds PR metadata as a **query** vector (`input_type: query` vs `document`
+  — Voyage optimizes retrieval differently for each)
+- pgvector cosine similarity search retrieves top-8 most relevant chunks
 - Sends retrieved context + PR metadata to Claude with a structured prompt
-- Persists reviews with status tracking (PENDING → COMPLETED / FAILED)
-- Idempotent: duplicate `deliveryId` events are skipped to prevent
-  double-billing the Claude API
+- Persists reviews with status tracking: `PENDING` → `COMPLETED` / `FAILED`
+- Idempotent: duplicate `deliveryId` events skipped to prevent double-billing
 - Multi-service Flyway coordination: `ignore-migration-patterns: "*:Missing"`
-  allows review-service to coexist with V1/V2 migrations owned by ingestion-service
+  lets review-service coexist with V1/V2 migrations owned by ingestion-service
+- **7 tests:** 4 prompt-building unit tests + 2 Testcontainers integration
+  tests with `@MockitoBean` for external APIs (no real API credits in CI)
 
 ```bash
 cd services/review-service
+./gradlew test
 ./gradlew bootRun   # :8083
 ```
 
