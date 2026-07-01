@@ -1,0 +1,84 @@
+name: notification-service CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/notification-service/**'
+      - '.github/workflows/notification-service-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/notification-service/**'
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/notification-service
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: prpilot
+          POSTGRES_PASSWORD: prpilot_dev
+          POSTGRES_DB: prpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      kafka:
+        image: confluentinc/cp-kafka:7.7.0
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          CLUSTER_ID: prpilot-kafka-cluster
+        ports:
+          - 9092:9092
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=prpilot_dev psql -h localhost -U prpilot -d prpilot -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Build and run tests
+        run: ./gradlew build
+        env:
+          GITHUB_TOKEN_PRPILOT: ${{ secrets.GITHUB_TOKEN_PRPILOT }}
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notification-service-test-report
+          path: services/notification-service/build/reports/tests/test/
+          retention-days: 14
