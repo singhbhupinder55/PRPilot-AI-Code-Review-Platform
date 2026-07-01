@@ -38,6 +38,7 @@ prpilot:
   kafka:
     topics:
       pr-events: pr.events
+      reviews-completed: reviews.completed
   retrieval:
     top-k: 8
   voyage:

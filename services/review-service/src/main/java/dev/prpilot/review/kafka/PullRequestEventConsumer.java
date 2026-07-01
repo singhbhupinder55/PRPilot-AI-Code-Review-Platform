@@ -24,6 +24,7 @@ public class PullRequestEventConsumer {
     private final RagRetrievalService ragRetrievalService;
     private final ClaudeReviewService claudeReviewService;
     private final ReviewRepository reviewRepository;
+    private final ReviewCompletedProducer reviewCompletedProducer;
 
     @Value("${prpilot.anthropic.model}")
     private String modelUsed;
@@ -35,13 +36,13 @@ public class PullRequestEventConsumer {
         log.info("Consumed event: delivery={}, repo={}, pr=#{}",
                 event.deliveryId(), event.repoFullName(), event.prNumber());
 
-        // Idempotency check — don't re-review the same delivery
+        // Idempotency check
         if (reviewRepository.findByDeliveryId(event.deliveryId()).isPresent()) {
             log.info("Skipping duplicate delivery={}", event.deliveryId());
             return;
         }
 
-        // Create a PENDING review record immediately
+        // Create PENDING review immediately
         Review review = Review.builder()
                 .repoFullName(event.repoFullName())
                 .prNumber(event.prNumber())
@@ -52,17 +53,15 @@ public class PullRequestEventConsumer {
         reviewRepository.save(review);
 
         try {
-            // 1. Build a query text from PR metadata
+            // 1. Embed the PR query
             String queryText = buildQueryText(event);
-
-            // 2. Embed the query (using "query" input_type for better retrieval)
             String queryEmbedding = embeddingService.embedQuery(queryText);
 
-            // 3. Retrieve relevant code chunks via pgvector similarity search
+            // 2. RAG retrieval
             List<String> relevantChunks = ragRetrievalService
                     .retrieveRelevantChunks(event.repoFullName(), queryEmbedding);
 
-            // 4. Call Claude with the context and generate review
+            // 3. Claude review
             String reviewBody = claudeReviewService.generateReview(
                     event.prTitle(),
                     event.prAuthor(),
@@ -70,13 +69,21 @@ public class PullRequestEventConsumer {
                     event.headSha(),
                     relevantChunks);
 
-            // 5. Persist the completed review
+            // 4. Persist completed review
             review.setStatus("COMPLETED");
             review.setReviewBody(reviewBody);
             review.setModelUsed(modelUsed);
             review.setChunksUsed(relevantChunks.size());
             review.setCompletedAt(Instant.now());
             reviewRepository.save(review);
+
+            // 5. Publish to reviews.completed so notification-service can post to GitHub
+            reviewCompletedProducer.publish(new ReviewCompletedEvent(
+                    event.deliveryId(),
+                    event.repoFullName(),
+                    event.prNumber(),
+                    event.htmlUrl(),
+                    reviewBody));
 
             log.info("Review completed for delivery={}, chunks={}, model={}",
                     event.deliveryId(), relevantChunks.size(), modelUsed);

@@ -1,9 +1,30 @@
 spring:
-  datasource:
-    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:5432/${POSTGRES_DB:prpilot}
-    username: ${POSTGRES_USER:prpilot}
-    password: ${POSTGRES_PASSWORD:prpilot_dev}
-  flyway:
-    ignore-migration-patterns: "*:Missing"
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: notification-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: dev.prpilot.notification.model.ReviewCompletedEvent
+        spring.json.trusted.packages: dev.prpilot.notification.model
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+prpilot:
+  kafka:
+    topics:
+      reviews-completed: reviews.completed
+  github:
+    token: test-token
+    api-url: https://api.github.com
